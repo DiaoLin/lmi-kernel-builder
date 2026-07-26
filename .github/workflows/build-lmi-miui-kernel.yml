@@ -22,7 +22,10 @@ jobs:
           sudo apt install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
           mkdir -p $HOME/.cache/ccache_mikernel
           echo "CCACHE_DIR=$HOME/.cache/ccache_mikernel" >> $GITHUB_ENV
-          
+          sudo fallocate -l 2G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
 
       # 2. 克隆内核源码仓库
       - name: Clone Kernel Source Repo
@@ -77,7 +80,7 @@ jobs:
           ln -sf $PWD/proton-clang $HOME/proton-clang
           echo "PATH=$HOME/proton-clang/proton-clang-20210522/bin:$PATH" >> $GITHUB_ENV
 
-      # 6. 执行build.sh编译，安全处理多zip文件名（修复env格式报错核心代码）
+      # 6. 编译脚本，输出无./前缀的文件列表到独立文件（核心修复）
       - name: Run Official Build Script (Output Dual Zip)
         timeout-minutes: 200
         run: |
@@ -86,20 +89,17 @@ jobs:
           echo "==================== 全部生成刷机包列表 ===================="
           ls -la ./*.zip
 
-          # 安全写入多文件，换行分隔规避文件名特殊字符解析失败
-          > zip_temp.txt
+          # 写入附件清单文件，去除./前缀，action直接读取此文件
+          rm -f upload_files.txt
           for zip_file in ./*.zip; do
-            echo "$zip_file" >> zip_temp.txt
+            # 移除开头 ./
+            echo "${zip_file#./}" >> upload_files.txt
           done
-          echo "ZIP_FILES<<EOF" >> $GITHUB_ENV
-          cat zip_temp.txt >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
 
-          # 版本标签与标题变量
           echo "RELEASE_TAG=LMI-Dual-Kernel-SukiSU-${{ github.sha }}" >> $GITHUB_ENV
           echo "RELEASE_TITLE=Redmi K30 Pro(lmi) AOSP+MIUI 双内核 SukiSU(KSU)" >> $GITHUB_ENV
 
-      # 7. 发布Release，自动上传AOSP、MIUI两个刷机包
+      # 7. 发布Release，读取文件清单上传刷机包
       - name: Publish GitHub Release Attach All Zips
         uses: softprops/action-gh-release@v1
         env:
@@ -119,6 +119,7 @@ jobs:
               2. Kernel_MIUI_*.zip 适配原厂MIUI固件
             # 刷入说明
             TWRP / OrangeFox 直接卡刷对应版本刷机包
-          files: ${{ env.ZIP_FILES }}
+          files_from_file: kernel/upload_files.txt
+          generate_release_notes: false
           draft: false
           prerelease: false
