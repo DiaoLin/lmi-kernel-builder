@@ -1,5 +1,5 @@
-name: Build LMI MIUI Kernel AnyKernel3
-run-name: LMI MIUI Kernel CI Build ${{ github.sha }}
+name: LMI MIUI Kernel Build (Follow Official README)
+run-name: Build lmi kernel ${{ github.sha }}
 on:
   workflow_dispatch:
   push:
@@ -11,115 +11,111 @@ permissions:
 
 env:
   DEVICE: lmi
-  DEFCONFIG: lmi_defconfig
-  SOURCE_REPO: liyafe1997/kernel_xiaomi_sm8250_mod
   PR_NUM: 56
-  ARCH: arm64
-  TOOLCHAIN_DIR: clang
-  OUT_DIR: out
+  CLANG_ZIP_TAG: 20210522
+  TOOLCHAIN_ROOT: proton-clang
+  TOOLCHAIN_FOLDER: proton-clang-${{ env.CLANG_ZIP_TAG }}
+  CCACHE_DIR: $HOME/.cache/ccache_mikernel
 
 jobs:
-  compile_kernel:
+  compile:
     runs-on: ubuntu-22.04
     steps:
-      - name: 安装编译依赖（完全匹配仓库README）
+      # 1. 严格按照 README 安装 Debian/Ubuntu 全套依赖
+      - name: Install official build dependencies
         run: |
           sudo apt update -y
-          sudo apt install -y git wget curl zip unzip tar build-essential libssl-dev bc flex bison python3 cpio libelf-dev libncurses-dev gcc-aarch64-linux-gnu
+          sudo apt install -y build-essential git curl wget bison flex zip bc cpio libssl-dev ccache python-is-python3
+          # 配置 ccache 缓存目录，和 build.sh 保持一致
+          mkdir -p ${{ env.CCACHE_DIR }}
+          echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" >> $GITHUB_ENV
 
-      - name: 拉取内核源码仓库
+      # 2. 拉取内核源码
+      - name: Clone kernel source repo
         run: |
-          git clone https://github.com/${{ env.SOURCE_REPO }} kernel
+          git clone https://github.com/liyafe1997/kernel_xiaomi_sm8250_mod kernel
           cd kernel
-          git config user.name "LMI-CI-Builder"
-          git config user.email "ci@local.build"
+          git config user.name "CI Builder"
+          git config user.email "ci@github.ci"
 
-      - name: 合并PR#56，自动解决README.md冲突（修复稳定版）
+      # 3. 合并 PR#56，仅自动修复 README.md 冲突
+      - name: Merge PR #${{ env.PR_NUM }} auto resolve README conflict
         run: |
           cd kernel
-          # 拉取PR分支
           git fetch origin pull/${{ env.PR_NUM }}/head:pr${{ env.PR_NUM }}
-          # 尝试合并，失败不退出
           git merge pr${{ env.PR_NUM }} -m "Merge PR #${{ env.PR_NUM }}" || true
-          # 判断是否存在冲突文件
           conflict_files=$(git ls-files -u)
           if [ -n "$conflict_files" ]; then
-            echo "检测到合并冲突，仅使用主线原版README.md"
-            # 主线版本覆盖冲突README
+            echo "Conflict detected, only keep main branch README.md"
             git checkout --ours README.md
             git add README.md
-            # 再次检查剩余冲突
-            remaining=$(git ls-files -u)
-            if [ -n "$remaining" ]; then
-              echo "::error::存在README以外代码冲突，构建终止：$remaining"
+            remaining_conflict=$(git ls-files -u)
+            if [ -n "$remaining_conflict" ]; then
+              echo "::error::Other source code conflict found, exit build: $remaining_conflict"
               exit 1
             fi
-            # 完成合并提交
-            git commit -m "Merge PR#${{ env.PR_NUM }} | Auto resolve README conflict"
+            git commit -m "Merge PR#${{ env.PR_NUM }} auto fix README conflict"
           fi
-          # 清理临时PR分支，避免残留
           git branch -D pr${{ env.PR_NUM }}
 
-      - name: 缓存Clang13工具链
+      # 4. 缓存固定版本 proton-clang，加速重复构建
+      - name: Cache proton-clang 20210522
         uses: actions/cache@v3
         with:
-          path: kernel/${{ env.TOOLCHAIN_DIR }}
-          key: proton-clang-13-sm8250-lmi
+          path: kernel/${{ env.TOOLCHAIN_ROOT }}
+          key: proton-clang-${{ env.CLANG_ZIP_TAG }}-lmi
 
-      - name: 下载Proton Clang 13（仓库兼容版本，修复KGDB汇编报错）
+      # 5. 严格按 README 下载指定 tag 工具链 20210522
+      - name: Download proton-clang 20210522 (document specified version)
         run: |
           cd kernel
-          if [ ! -d ${{ env.TOOLCHAIN_DIR }} ]; then
-            git clone https://github.com/kdrag0n/proton-clang.git ${{ env.TOOLCHAIN_DIR }} --depth=1
-            cd ${{ env.TOOLCHAIN_DIR }}
-            git checkout 13
+          if [ ! -d ${{ env.TOOLCHAIN_ROOT }}/${{ env.TOOLCHAIN_FOLDER }} ]; then
+            mkdir -p ${{ env.TOOLCHAIN_ROOT }}
+            cd ${{ env.TOOLCHAIN_ROOT }}
+            wget https://github.com/kdrag0n/proton-clang/archive/refs/tags/${{ env.CLANG_ZIP_TAG }}.zip
+            unzip ${{ env.CLANG_ZIP_TAG }}.zip
+            rm -f ${{ env.CLANG_ZIP_TAG }}.zip
             cd ..
           fi
-          echo "PATH=$PWD/${{ env.TOOLCHAIN_DIR }}/bin:$PATH" >> $GITHUB_ENV
+          # 把工具链 bin 写入环境变量 PATH，匹配 build.sh 路径规则
+          echo "PATH=$PWD/${{ env.TOOLCHAIN_ROOT }}/${{ env.TOOLCHAIN_FOLDER }}/bin:$PATH" >> $GITHUB_ENV
 
-      - name: 内核编译（严格遵循README原版编译流程）
+      # 6. 使用官方 build.sh 编译 lmi 内核（完全对齐本地手动构建命令）
+      - name: Build kernel via official build.sh (no KernelSU)
         run: |
           cd kernel
-          make clean O=${{ env.OUT_DIR }}
-          make mrproper O=${{ env.OUT_DIR }}
-          make ${{ env.DEFCONFIG }} O=${{ env.OUT_DIR }} ARCH=${{ env.ARCH }} CC=clang
-          make -j$(nproc) O=${{ env.OUT_DIR }} \
-            ARCH=${{ env.ARCH }} \
-            CC=clang \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            LLVM=1
+          bash build.sh ${{ env.DEVICE }}
 
-      - name: 拉取AnyKernel3打包模板
+      # 7. 拉取 AnyKernel3 打包模板
+      - name: Prepare AnyKernel3 packaging
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 anykernel3
           cd anykernel3
           rm -rf Image Image.gz Image.gz-dtb dtbo.img dtb modules ramdisk
 
-      - name: 复制内核产物（lmi MIUI专用，匹配README打包规则）
+      # 8. 复制编译输出产物至刷机包（适配 lmi SM8250 MIUI）
+      - name: Copy kernel output to AnyKernel3
         run: |
-          cp kernel/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz-dtb anykernel3/
+          cp kernel/out/arch/arm64/boot/Image.gz-dtb anykernel3/
           mkdir -p anykernel3/dtb
-          cp -r kernel/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dts/vendor/xiaomi/lmi/* anykernel3/dtb/
-          cp kernel/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbo.img anykernel3/
+          cp -r kernel/out/arch/arm64/boot/dts/vendor/xiaomi/lmi/* anykernel3/dtb/
+          cp kernel/out/arch/arm64/boot/dtbo.img anykernel3/
           mkdir -p anykernel3/modules
-          find kernel/${{ env.OUT_DIR }}/modules/lib/modules -name "*.ko" -exec cp {} anykernel3/modules/ \;
+          find kernel/out/modules/lib/modules -name "*.ko" -exec cp {} anykernel3/modules/ \;
 
-      - name: 生成刷机包并定义Release变量
+      # 9. 生成刷机 ZIP 包并设置 Release 变量
+      - name: Generate flashable zip
         run: |
           cd anykernel3
           ZIP_NAME=LMI-MIUI-Kernel-PR${{ env.PR_NUM }}-${{ github.sha }}.zip
           zip -r9 $ZIP_NAME *
           mv $ZIP_NAME ../
           echo "ZIP_FILE=$ZIP_NAME" >> $GITHUB_ENV
-          echo "RELEASE_TAG=LMI-MIUI-Kernel-${{ github.sha }}" >> $GITHUB_ENV
-          echo "RELEASE_TITLE=LMI Redmi K30 Pro MIUI 内核(合并PR#${{ env.PR_NUM }})" >> $GITHUB_ENV
+          echo "RELEASE_TAG=LMI-Kernel-${{ github.sha }}" >> $GITHUB_ENV
+          echo "RELEASE_TITLE=Redmi K30 Pro(lmi) MIUI Kernel PR#${{ env.PR_NUM }}" >> $GITHUB_ENV
 
-      - name: 发布GitHub Release
+      # 10. 自动发布 GitHub Release
+      - name: Publish Release
         uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -127,17 +123,15 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: ${{ env.RELEASE_TITLE }}
           body: |
-            ## 构建信息
-            - 设备：Redmi K30 Pro (lmi) MIUI专用内核
-            - 源码仓库：https://github.com/${{ env.SOURCE_REPO }}
-            - 已合并 PR #${{ env.PR_NUM }}
-            - 编译工具：Proton Clang 13（保留原生KGDB配置，规避汇编报错）
-            - 构建Commit：${{ github.sha }}
-            - 编译流程：完全遵循仓库README.md说明
-            ## 使用说明
-            1. 适配原厂MIUI，AnyKernel3通用卡刷包
-            2. TWRP/OrangeFox 直接刷入
-            3. 内置完整dtb、dtbo、驱动ko模块
+            ## Build Info
+            - Device: lmi (Redmi K30 Pro / POCO F2 Pro)
+            - Build Script: Official repo build.sh lmi
+            - Toolchain: proton-clang tag 20210522 (README specified version)
+            - Merged PR: #${{ env.PR_NUM }}
+            - Ccache enabled, cache dir: ${{ env.CCACHE_DIR }}
+            - Compile Method: Fully follow repository README guide
+            ## Flash Instruction
+            Flash via TWRP/OrangeFox, native MIUI compatible.
           files: ${{ env.ZIP_FILE }}
           draft: false
           prerelease: false
