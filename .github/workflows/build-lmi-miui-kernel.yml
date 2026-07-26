@@ -57,17 +57,22 @@ jobs:
         uses: actions/cache@v3
         with:
           path: kernel/${{ env.TOOLCHAIN_DIR }}
-          key: proton-clang-sm8250-lmi
+          # key 加版本标识，区分新版clang缓存
+          key: proton-clang-13-sm8250-lmi
 
-      - name: 下载Proton Clang工具链（仓库README标准工具链）
+      - name: 下载 Proton Clang 13（旧版宽松汇编校验，修复brk立即数报错）
         run: |
           cd kernel
           if [ ! -d ${{ env.TOOLCHAIN_DIR }} ]; then
             git clone https://github.com/kdrag0n/proton-clang.git ${{ env.TOOLCHAIN_DIR }} --depth=1
+            cd ${{ env.TOOLCHAIN_DIR }}
+            # 切换到 clang13 稳定分支，规避严格汇编检查
+            git checkout 13
+            cd ..
           fi
           echo "PATH=$PWD/${{ env.TOOLCHAIN_DIR }}/bin:$PATH" >> $GITHUB_ENV
 
-      - name: MIUI LMI 内核编译（关闭KGDB修复汇编报错）
+      - name: MIUI LMI 内核编译（不修改KGDB配置，依靠旧clang兼容）
         run: |
           cd kernel
           # 清理旧构建产物
@@ -75,11 +80,6 @@ jobs:
           make mrproper O=${{ env.OUT_DIR }}
           # 生成defconfig
           make ${{ env.DEFCONFIG }} O=${{ env.OUT_DIR }} ARCH=${{ env.ARCH }} CC=clang
-          # 关闭KGDB调试，解决brk立即数超出范围编译错误
-          sed -i 's/CONFIG_KGDB=y/# CONFIG_KGDB is not set/' out/.config
-          sed -i 's/CONFIG_KGDB_SERIAL_CONSOLE=y/# CONFIG_KGDB_SERIAL_CONSOLE is not set/' out/.config
-          sed -i 's/CONFIG_KGDB_KDB=y/# CONFIG_KGDB_KDB is not set/' out/.config
-          make savedefconfig O=${{ env.OUT_DIR }}
           # MIUI专用完整编译参数，SM8250标准LLVM编译
           make -j$(nproc) O=${{ env.OUT_DIR }} \
             ARCH=${{ env.ARCH }} \
@@ -134,9 +134,8 @@ jobs:
             - 设备：Redmi K30 Pro (lmi) MIUI专用内核
             - 源码仓库：https://github.com/${{ env.SOURCE_REPO }}
             - 已本地合并 PR #${{ env.PR_NUM }}
-            - 编译工具：Proton Clang LLVM
+            - 编译工具：Proton Clang 13（兼容旧内核汇编语法，保留KGDB调试）
             - 构建Commit：${{ github.sha }}
-            - 修复：关闭KGDB调试，规避AArch64 brk汇编约束报错
             ## 使用说明
             1. 适用于原厂MIUI系统，通用AnyKernel3卡刷包
             2. 支持TWRP/OrangeFox直接刷入
