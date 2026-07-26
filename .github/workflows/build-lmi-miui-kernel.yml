@@ -1,5 +1,5 @@
-name: Build lmi MIUI Kernel With KernelSU
-run-name: LMI Kernel KSU Build ${{ github.sha }}
+name: Build lmi MIUI+AOSP Kernel With SukiSU(KSU)
+run-name: LMI Dual Kernel KSU Build ${{ github.sha }}
 on:
   workflow_dispatch:
   push:
@@ -13,53 +13,62 @@ jobs:
   build_kernel:
     runs-on: ubuntu-22.04
     steps:
-      # 1. 安装依赖
-      - name: Install Build Dependencies
+      # 1. 完整依赖安装 + 2G Swap 防止编译内存溢出
+      - name: Install Full Build Dependencies & Swap
         run: |
           sudo apt update -y
           sudo apt install -y build-essential git curl wget bison flex zip bc cpio libssl-dev ccache python-is-python3
+          # 脚本强制检测arm/aarch64交叉ld，必须安装
+          sudo apt install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+          # 和脚本CCACHE_DIR路径完全对齐
           mkdir -p $HOME/.cache/ccache_mikernel
           echo "CCACHE_DIR=$HOME/.cache/ccache_mikernel" >> $GITHUB_ENV
+          # 扩容交换分区
+          sudo fallocate -l 2G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
 
-      # 2. 拉取内核源码
-      - name: Clone Kernel Source
+      # 2. 克隆内核源码仓库
+      - name: Clone Kernel Source Repo
         run: |
           git clone https://github.com/liyafe1997/kernel_xiaomi_sm8250_mod kernel
           cd kernel
           git config user.name "Kernel-CI-Builder"
           git config user.email "ci@mikernel.local"
 
-      # 3. 合并PR#56，仅修复README冲突
-      - name: Merge PR & Auto Resolve README Conflict
+      # 3. 合并PR#56，仅自动修复README.md冲突，其他源码冲突直接终止构建
+      - name: Merge PR #56 Auto Fix README Conflict
         run: |
           cd kernel
           git fetch origin pull/56/head:pr56
           git merge pr56 -m "Merge PR #56" || true
           conflict_list=$(git ls-files -u)
           if [[ -n "$conflict_list" ]]; then
-            echo "检测到冲突，仅保留主线原版README.md"
+            echo "==== 检测到代码冲突 ===="
+            echo "仅保留主线README.md文件"
             git checkout --ours README.md
             git add README.md
             remaining_conflict=$(git ls-files -u)
             if [[ -n "$remaining_conflict" ]]; then
-              echo "::error::存在README以外文件冲突，终止构建：$remaining_conflict"
+              echo "::error::存在内核源码冲突，终止构建：$remaining_conflict"
               exit 1
             fi
-            git commit -m "Merge PR#56 | Auto fixed README conflict"
+            git commit -m "Merge PR#56 | Auto fixed README conflict only"
           fi
           git branch -D pr56
 
-      # 4. 缓存工具链 + CCACHE
+      # 4. 缓存工具链与CCACHE，加速重复构建
       - name: Cache Toolchain & CCACHE
         uses: actions/cache@v3
         with:
           path: |
             kernel/proton-clang
             $HOME/.cache/ccache_mikernel
-          key: mikernel-clang-20210522-lmi-ksu
+          key: mikernel-clang-20210522-lmi-ksu-dual
 
-      # 5. 下载 proton-clang 20210522 + 创建软链接匹配脚本路径
-      - name: Download Proton Clang 20210522 & Fix Path
+      # 5. 下载 proton-clang 20210522 + 软链接修复TOOLCHAIN_PATH路径报错
+      - name: Download Proton-Clang & Fix Path Mapping
         run: |
           cd kernel
           if [ ! -d proton-clang/proton-clang-20210522 ]; then
@@ -70,46 +79,26 @@ jobs:
             rm -f 20210522.zip
             cd ..
           fi
-          # 关键修复：创建软链接，匹配脚本默认 /home/runner/proton-clang
+          # 软链接匹配脚本 $HOME/proton-clang 路径
           ln -sf $PWD/proton-clang $HOME/proton-clang
           echo "PATH=$HOME/proton-clang/proton-clang-20210522/bin:$PATH" >> $GITHUB_ENV
 
-      # 6. 编译带 KernelSU
-      - name: Compile Kernel With KernelSU
+      # 6. 执行原生build.sh，自动生成AOSP+MIUI两个刷机包并收集全部zip
+      - name: Run Official Build Script (Output Dual Zip)
         run: |
           cd kernel
+          # 带KSU/SukiSU编译双内核包
           bash build.sh lmi ksu
+          echo "==================== 全部生成刷机包列表 ===================="
+          ls -la ./*.zip
+          # 收集根目录所有zip，空格分隔存入环境变量
+          ALL_ZIPS=$(ls ./*.zip)
+          echo "ZIP_FILES=$ALL_ZIPS" >> $GITHUB_ENV
+          echo "RELEASE_TAG=LMI-Dual-Kernel-SukiSU-${{ github.sha }}" >> $GITHUB_ENV
+          echo "RELEASE_TITLE=Redmi K30 Pro(lmi) AOSP+MIUI 双内核 SukiSU(KSU)" >> $GITHUB_ENV
 
-      # 7. AnyKernel3 打包模板
-      - name: Prepare AnyKernel3 Template
-        run: |
-          git clone https://github.com/osm0sis/AnyKernel3 anykernel3
-          cd anykernel3
-          rm -rf Image Image.gz Image.gz-dtb dtbo.img dtb modules ramdisk
-
-      # 8. 复制内核产物
-      - name: Copy Kernel Output Files
-        run: |
-          cp kernel/out/arch/arm64/boot/Image.gz-dtb anykernel3/
-          mkdir -p anykernel3/dtb
-          cp -r kernel/out/arch/arm64/boot/dts/vendor/xiaomi/lmi/* anykernel3/dtb/
-          cp kernel/out/arch/arm64/boot/dtbo.img anykernel3/
-          mkdir -p anykernel3/modules
-          find kernel/out/modules/lib/modules -name "*.ko" -exec cp {} anykernel3/modules/ \;
-
-      # 9. 打包刷机包
-      - name: Generate Flashable Zip Package
-        run: |
-          cd anykernel3
-          ZIP_FILE_NAME=LMI-KSU-Kernel-PR56-${{ github.sha }}.zip
-          zip -r9 $ZIP_FILE_NAME *
-          mv $ZIP_FILE_NAME ../
-          echo "ZIP_FILE=$ZIP_FILE_NAME" >> $GITHUB_ENV
-          echo "RELEASE_TAG=LMI-KSU-Kernel-${{ github.sha }}" >> $GITHUB_ENV
-          echo "RELEASE_TITLE=Redmi K30 Pro(lmi) MIUI Kernel + KernelSU PR#56" >> $GITHUB_ENV
-
-      # 10. 自动发布 Release
-      - name: Publish GitHub Release
+      # 7. 发布Release，自动上传AOSP、MIUI两个刷机包
+      - name: Publish GitHub Release Attach All Zips
         uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -119,16 +108,15 @@ jobs:
           body: |
             # 构建信息
             - 设备机型：lmi (Redmi K30 Pro / POCO F2 Pro)
-            - 编译模式：带 KernelSU
-            - 编译脚本：bash build.sh lmi ksu
-            - 编译工具：proton-clang tag 20210522（仓库README指定版本）
-            - 已合并PR：#56
-            - 加速：CCACHE 编译缓存开启
-            - 路径修复：软链接匹配脚本默认TOOLCHAIN_PATH
+            - 编译模式：开启 SukiSU Ultra (KSU SUSFS + KPM)
+            - 编译命令：bash build.sh lmi ksu
+            - 工具链：proton-clang tag 20210522
+            - 合并补丁：PR #56（仅README冲突自动修复）
+            - 输出产物：
+              1. Kernel_AOSP_*.zip 适配类原生/AOSP固件
+              2. Kernel_MIUI_*.zip 适配原厂MIUI固件
             # 刷入说明
-            1. 适配原厂MIUI系统
-            2. TWRP / OrangeFox 直接卡刷
-            3. 内置完整dtb、dtbo、内核驱动与KernelSU支持
-          files: ${{ env.ZIP_FILE }}
+            TWRP / OrangeFox 直接卡刷对应版本刷机包
+          files: ${{ env.ZIP_FILES }}
           draft: false
           prerelease: false
