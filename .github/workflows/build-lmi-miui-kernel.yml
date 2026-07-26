@@ -13,7 +13,7 @@ jobs:
   build_kernel:
     runs-on: ubuntu-22.04
     steps:
-      # 1. 严格按照 README 安装全套编译依赖
+      # 1. 安装依赖
       - name: Install Build Dependencies
         run: |
           sudo apt update -y
@@ -29,7 +29,7 @@ jobs:
           git config user.name "Kernel-CI-Builder"
           git config user.email "ci@mikernel.local"
 
-      # 3. 合并PR#56，仅自动修复README.md冲突
+      # 3. 合并PR#56，仅修复README冲突
       - name: Merge PR & Auto Resolve README Conflict
         run: |
           cd kernel
@@ -49,7 +49,7 @@ jobs:
           fi
           git branch -D pr56
 
-      # 4. 缓存工具链 + CCACHE（静态key，无语法报错）
+      # 4. 缓存工具链 + CCACHE
       - name: Cache Toolchain & CCACHE
         uses: actions/cache@v3
         with:
@@ -58,8 +58,8 @@ jobs:
             $HOME/.cache/ccache_mikernel
           key: mikernel-clang-20210522-lmi-ksu
 
-      # 5. 按README下载指定版本 proton-clang 20210522
-      - name: Download Proton Clang 20210522
+      # 5. 下载 proton-clang 20210522 + 创建软链接匹配脚本路径
+      - name: Download Proton Clang 20210522 & Fix Path
         run: |
           cd kernel
           if [ ! -d proton-clang/proton-clang-20210522 ]; then
@@ -70,22 +70,24 @@ jobs:
             rm -f 20210522.zip
             cd ..
           fi
-          echo "PATH=$PWD/proton-clang/proton-clang-20210522/bin:$PATH" >> $GITHUB_ENV
+          # 关键修复：创建软链接，匹配脚本默认 /home/runner/proton-clang
+          ln -sf $PWD/proton-clang $HOME/proton-clang
+          echo "PATH=$HOME/proton-clang/proton-clang-20210522/bin:$PATH" >> $GITHUB_ENV
 
-      # 6. 调用官方脚本编译 带 KernelSU：bash build.sh lmi ksu
+      # 6. 编译带 KernelSU
       - name: Compile Kernel With KernelSU
         run: |
           cd kernel
           bash build.sh lmi ksu
 
-      # 7. 初始化 AnyKernel3 打包模板
+      # 7. AnyKernel3 打包模板
       - name: Prepare AnyKernel3 Template
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 anykernel3
           cd anykernel3
           rm -rf Image Image.gz Image.gz-dtb dtbo.img dtb modules ramdisk
 
-      # 8. 复制内核输出文件
+      # 8. 复制内核产物
       - name: Copy Kernel Output Files
         run: |
           cp kernel/out/arch/arm64/boot/Image.gz-dtb anykernel3/
@@ -95,7 +97,7 @@ jobs:
           mkdir -p anykernel3/modules
           find kernel/out/modules/lib/modules -name "*.ko" -exec cp {} anykernel3/modules/ \;
 
-      # 9. 打包刷机包，定义Release变量
+      # 9. 打包刷机包
       - name: Generate Flashable Zip Package
         run: |
           cd anykernel3
@@ -122,7 +124,7 @@ jobs:
             - 编译工具：proton-clang tag 20210522（仓库README指定版本）
             - 已合并PR：#56
             - 加速：CCACHE 编译缓存开启
-            - 构建规范：完全遵循仓库官方 How to build 文档
+            - 路径修复：软链接匹配脚本默认TOOLCHAIN_PATH
             # 刷入说明
             1. 适配原厂MIUI系统
             2. TWRP / OrangeFox 直接卡刷
