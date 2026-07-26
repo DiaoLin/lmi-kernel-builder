@@ -23,12 +23,7 @@ jobs:
           # 和脚本CCACHE_DIR路径完全对齐
           mkdir -p $HOME/.cache/ccache_mikernel
           echo "CCACHE_DIR=$HOME/.cache/ccache_mikernel" >> $GITHUB_ENV
-          # 扩容交换分区
-          sudo fallocate -l 2G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-
+          
       # 2. 克隆内核源码仓库
       - name: Clone Kernel Source Repo
         run: |
