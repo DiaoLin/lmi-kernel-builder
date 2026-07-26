@@ -12,27 +12,27 @@ permissions:
 jobs:
   build_kernel:
     runs-on: ubuntu-22.04
+    timeout-minutes: 240
     steps:
       # 1. 完整依赖安装 + 2G Swap 防止编译内存溢出
       - name: Install Full Build Dependencies & Swap
         run: |
           sudo apt update -y
           sudo apt install -y build-essential git curl wget bison flex zip bc cpio libssl-dev ccache python-is-python3
-          # 脚本强制检测arm/aarch64交叉ld，必须安装
           sudo apt install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
-          # 和脚本CCACHE_DIR路径完全对齐
           mkdir -p $HOME/.cache/ccache_mikernel
           echo "CCACHE_DIR=$HOME/.cache/ccache_mikernel" >> $GITHUB_ENV
           
+
       # 2. 克隆内核源码仓库
       - name: Clone Kernel Source Repo
         run: |
           git clone https://github.com/liyafe1997/kernel_xiaomi_sm8250_mod kernel
           cd kernel
-          git config user.name "Kernel-CI-Builder"
-          git config user.email "ci@mikernel.local"
+          git config user.name "Kernel-CI-Bot"
+          git config user.email "ci@github.com"
 
-      # 3. 合并PR#56，仅自动修复README.md冲突，其他源码冲突直接终止构建
+      # 3. 合并PR#56，仅自动修复README.md冲突
       - name: Merge PR #56 Auto Fix README Conflict
         run: |
           cd kernel
@@ -53,7 +53,7 @@ jobs:
           fi
           git branch -D pr56
 
-      # 4. 缓存工具链与CCACHE，加速重复构建
+      # 4. 缓存工具链与CCACHE，大幅减少重复编译耗时
       - name: Cache Toolchain & CCACHE
         uses: actions/cache@v3
         with:
@@ -74,21 +74,28 @@ jobs:
             rm -f 20210522.zip
             cd ..
           fi
-          # 软链接匹配脚本 $HOME/proton-clang 路径
           ln -sf $PWD/proton-clang $HOME/proton-clang
           echo "PATH=$HOME/proton-clang/proton-clang-20210522/bin:$PATH" >> $GITHUB_ENV
 
-      # 6. 执行原生build.sh，自动生成AOSP+MIUI两个刷机包并收集全部zip
+      # 6. 执行build.sh编译，安全处理多zip文件名（修复env格式报错核心代码）
       - name: Run Official Build Script (Output Dual Zip)
+        timeout-minutes: 200
         run: |
           cd kernel
-          # 带KSU/SukiSU编译双内核包
           bash build.sh lmi ksu
           echo "==================== 全部生成刷机包列表 ===================="
           ls -la ./*.zip
-          # 收集根目录所有zip，空格分隔存入环境变量
-          ALL_ZIPS=$(ls ./*.zip)
-          echo "ZIP_FILES=$ALL_ZIPS" >> $GITHUB_ENV
+
+          # 安全写入多文件，换行分隔规避文件名特殊字符解析失败
+          > zip_temp.txt
+          for zip_file in ./*.zip; do
+            echo "$zip_file" >> zip_temp.txt
+          done
+          echo "ZIP_FILES<<EOF" >> $GITHUB_ENV
+          cat zip_temp.txt >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+          # 版本标签与标题变量
           echo "RELEASE_TAG=LMI-Dual-Kernel-SukiSU-${{ github.sha }}" >> $GITHUB_ENV
           echo "RELEASE_TITLE=Redmi K30 Pro(lmi) AOSP+MIUI 双内核 SukiSU(KSU)" >> $GITHUB_ENV
 
