@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 240
     steps:
-      # 1. 完整依赖安装 + 2G Swap 防止编译内存溢出
+      # 1. 完整依赖 + 2G Swap
       - name: Install Full Build Dependencies & Swap
         run: |
           sudo apt update -y
@@ -22,9 +22,12 @@ jobs:
           sudo apt install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
           mkdir -p $HOME/.cache/ccache_mikernel
           echo "CCACHE_DIR=$HOME/.cache/ccache_mikernel" >> $GITHUB_ENV
-          
+          sudo fallocate -l 2G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
 
-      # 2. 克隆内核源码仓库
+      # 2. 克隆内核源码到 kernel 文件夹
       - name: Clone Kernel Source Repo
         run: |
           git clone https://github.com/liyafe1997/kernel_xiaomi_sm8250_mod kernel
@@ -53,7 +56,7 @@ jobs:
           fi
           git branch -D pr56
 
-      # 4. 缓存工具链与CCACHE，大幅减少重复编译耗时
+      # 4. 缓存工具链与CCACHE
       - name: Cache Toolchain & CCACHE
         uses: actions/cache@v3
         with:
@@ -62,7 +65,7 @@ jobs:
             $HOME/.cache/ccache_mikernel
           key: mikernel-clang-20210522-lmi-ksu-dual
 
-      # 5. 下载 proton-clang 20210522 + 软链接修复TOOLCHAIN_PATH路径报错
+      # 5. 下载 proton-clang 工具链
       - name: Download Proton-Clang & Fix Path Mapping
         run: |
           cd kernel
@@ -77,7 +80,7 @@ jobs:
           ln -sf $PWD/proton-clang $HOME/proton-clang
           echo "PATH=$HOME/proton-clang/proton-clang-20210522/bin:$PATH" >> $GITHUB_ENV
 
-      # 6. 编译脚本，输出无./前缀的文件列表到独立文件（核心修复）
+      # 6. 编译脚本，正确拼接完整仓库路径（修复核心）
       - name: Run Official Build Script (Output Dual Zip)
         timeout-minutes: 200
         run: |
@@ -86,17 +89,27 @@ jobs:
           echo "==================== 全部生成刷机包列表 ===================="
           ls -la ./*.zip
 
-          # 写入附件清单文件，去除./前缀，action直接读取此文件
-          rm -f upload_files.txt
-          for zip_file in ./*.zip; do
-            # 移除开头 ./
-            echo "${zip_file#./}" >> upload_files.txt
+          # 重置变量，逐一生成完整路径 kernel/xxx.zip
+          ZIP_LIST=""
+          for file in ./*.zip
+          do
+            full_path="kernel/${file#./}"
+            ZIP_LIST+="$full_path"$'\n'
           done
+
+          # 打印最终要上传的路径，方便排错
+          echo "==== 待上传文件完整路径 ===="
+          echo "$ZIP_LIST"
+
+          # 多行写入环境变量
+          echo "ZIP_FILES<<EOF" >> $GITHUB_ENV
+          echo "$ZIP_LIST" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
           echo "RELEASE_TAG=LMI-Dual-Kernel-SukiSU-${{ github.sha }}" >> $GITHUB_ENV
           echo "RELEASE_TITLE=Redmi K30 Pro(lmi) AOSP+MIUI 双内核 SukiSU(KSU)" >> $GITHUB_ENV
 
-      # 7. 发布Release，读取文件清单上传刷机包
+      # 7. 发布Release上传刷机包
       - name: Publish GitHub Release Attach All Zips
         uses: softprops/action-gh-release@v1
         env:
@@ -116,7 +129,8 @@ jobs:
               2. Kernel_MIUI_*.zip 适配原厂MIUI固件
             # 刷入说明
             TWRP / OrangeFox 直接卡刷对应版本刷机包
-          files_from_file: kernel/upload_files.txt
+          files: ${{ env.ZIP_FILES }}
+          fail_on_unmatched_files: true
           generate_release_notes: false
           draft: false
           prerelease: false
